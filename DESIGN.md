@@ -1,195 +1,226 @@
-# dsh-mcp-manager v0.2 — MCP 管理插件设计（GUI + 密钥加密）
+# dsh-mcp-manager 设计（v0.3.0）
 
-> 状态：已实施。日期：2026-10-19（2026-10-21 移除工作区作用域）。
-> 相关结论见 `../decisions/decisions-log.md`。
+> 状态：已实施并通过隔离 e2e。初版 2026-10-19；2026-10-21 移除工作区作用域与自建加密。
+> 面向维护者的实现约定；用户使用说明见 [README.md](README.md)。
 
-## 1. 目标
+## 1. 目标与非目标
 
-在 DSH Desktop 里像「消息」插件一样管理 MCP：
+**目标**
 
-- 左侧栏一个「MCP」面板（`sidebar.panellist` + `main`），原生 React 页面，风格对齐「插件」页；
-- 可视化增 / 删 / 改 MCP server（stdio 与 streamable-http），启停；
-- 每个 server 一条「连通性测试」：握手 + `tools/list` + 延迟 + 错误分类；
-- **连接挂在 profile 级**（一个宿主进程一份，经 `@deepseek-ai/dsh-mcp-client` 动态挂载）；
-- server 对 profile 内**所有会话生效**（按工作区划分作用范围的机制已于 2026-10-21 整个移除）；
-- header/env 支持 `env:` / `credential:` 引用；支持粘贴 `mcpServers` JSON 导入；只读展示宿主原生 MCP。
+- 在 DSH Desktop 里用原生 GUI 管理 MCP：增删改、启停、连通性测试、粘贴 `mcpServers` JSON 导入；
+- 连接挂在 **profile 级**（一个宿主进程一份），通过 `@deepseek-ai/dsh-mcp-client` 动态挂载，工具以 `mcp__<server>__<tool>` 暴露；
+- 注册表独立于 patch 层：增删改不触发插件树热重载；
+- 只读展示宿主已配置的原生 MCP，并处理同名冲突；
+- 密钥优先引用化（`env:` / `credential:`），允许 0600 明文，**不自建加密**。
 
-## 2. 作用域模型
+**非目标**
 
-MCP 的安装、连接、可见性均为 **profile 级**：Desktop 固定 `desktop` profile，即整个桌面实例的所有会话、所有工作区共享同一套 MCP。
+- 不做按工作区/会话的能力隔离（已移除，见 §10）；
+- 不做密钥静态加密（已移除，见 §10）；
+- 不实现 OAuth 流程；不管理 stdio server 的包安装（命令自行负责 `npx`/`uvx`）；
+- 不修改其他插件/profile 配置。
 
-> 2026-10-21：按 Workspace 收窄可见性/调用的整套机制（`visibility` restrict + 调用时守卫）已按用户要求移除，不再维护。
+## 2. 作用域与生命周期
+
+| 维度 | 语义 |
+|---|---|
+| 安装 / 连接 / 凭据 | profile 级；Desktop 固定 `desktop` profile |
+| 可见性 | 该 profile 内所有会话、所有工作区共享同一套 MCP |
+| 挂载时机 | 插件 apply 时挂载启用的 server；manifest 变更后差分 mount/unmount |
+| 数据生命周期 | manifest 常驻；卸载插件不删 manifest |
 
 ## 3. 数据
 
-### manifest（默认 `$DSH_HOME/mcp-manager.json`，0600，原子写）
+### 3.1 manifest
+
+默认 `$DSH_HOME/mcp-manager.json`（Config `manifestFile` 可覆盖），JSON v2，原子写、0600。
 
 ```json
 {
   "version": 2,
   "servers": [
     {
-      "serverName": "github",
+      "serverName": "flomo",
+      "transport": "streamable-http",
+      "enabled": true,
+      "toolCallTimeoutMs": 60000,
+      "url": "https://flomoapp.com/mcp",
+      "headers": { "Authorization": "credential:FLOMO_TOKEN" }
+    },
+    {
+      "serverName": "fetch",
       "transport": "stdio",
       "enabled": true,
       "toolCallTimeoutMs": 60000,
       "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-github"],
-      "env": { "GITHUB_TOKEN": "env:GITHUB_TOKEN" },
+      "args": ["-y", "mcp-server-fetch"],
+      "env": {},
       "cwd": ""
-    },
-    {
-      "serverName": "unifuncs",
-      "transport": "streamable-http",
-      "enabled": true,
-      "toolCallTimeoutMs": 900000,
-      "url": "https://mcp.unifuncs.com/mcp",
-      "headers": { "Authorization": "env:MCP_UNIFUNCS_API_KEY" }
     }
   ]
 }
 ```
 
-- 值里出现 `env:NAME` 时在 mount / probe 时从宿主环境解析；解析失败 → 该 server 挂载失败并记录 `lastError`，不崩宿主。
-- 读 v1 manifest 兼容；旧版本可能残留的 `workspaces` / `externalScopes` 字段在加载时被忽略并**一次性原子重写剥离**（按用户决定，不保留）。
+- `serverName`：`[A-Za-z0-9_-]{1,32}`，决定工具前缀；
+- `transport`：`stdio` | `streamable-http`；
+- 新增默认 `enabled: true`、`toolCallTimeoutMs: 60000`；
+- 旧版本遗留的 `workspaces`（server 字段）与 `externalScopes`（顶层）在加载时忽略并**一次性原子剥离**。
 
-### 3.1 密钥存储（引用式 + 明文）
+### 3.2 header/env 值解析
 
-header/env 的值支持三种形态：
+挂载/探测时按顺序解析：
 
-1. `credential:NAME` —— 走 `ctx.credentials.resolve`，密钥存在 DSH 凭据库（`$DSH_HOME/.credentials.yaml`，0600）；
-2. `env:NAME` —— 从宿主 `process.env` 读取（`$DSH_HOME/.env` / 启动环境，0600）；
-3. 其它 —— 明文，直接存在 manifest（0600）。
+1. `credential:NAME` → `ctx.credentials`（DSH 凭据库 `$DSH_HOME/.credentials.yaml`，0600）；
+2. `env:NAME` → 宿主 `process.env`（含 `$DSH_HOME/.env` / 启动环境）；
+3. 其它 → 原样作为明文使用。
 
-- 解析在 mount / probe / 测试时进行；解析失败写 `lastError`（`ENV_MISSING` / `CREDENTIAL_MISSING` / `CREDENTIAL_UNAVAILABLE`），不崩宿主。
-- manifest 与 `state` 中，引用字符串原样保存/返回，明文按加密前行为直接展示（GUI 可编辑）。
-- 不再有自建加密（`enc:v1`、keychain/electron provider、掩码、迁移、`secrets.encryptExisting`）。理由：同用户进程（含 agent）可直接读取解密密钥，静态加密只防「文件副本泄露」且带来 provider 失败/迁移不可逆等成本；平台自身（DSH credential store、`.env`）也是 0600 明文。
+失败码：`ENV_MISSING`、`CREDENTIAL_MISSING`、`CREDENTIAL_UNAVAILABLE`、`CREDENTIAL_RESOLVE_FAILED`；
+失败只写该 server 的 `lastError`，不崩宿主。`state` 原样返回引用字符串，不展开解析后的值。
+
+编辑语义（`mergeServerValues`）：同名 entry 空值 → 保留旧值；entry 从数组消失 → 删除；新 entry 空值 → `INVALID_INPUT`。
 
 ## 4. 运行时
 
 ### 4.1 挂载
 
-沿用旧实现：`await ctx.plugin(McpClient, bridgeConfig(spec))`，`failOnStartupError: false`；卸载 `fiber.dispose()`。
-启用的 server 在插件 apply 时自动挂载（`autoMount`），manifest 变更后就地 mount/unmount。
+`await ctx.plugin(McpClient, bridgeConfig(spec))`，`failOnStartupError: false`；`fiber.dispose()` 卸载。
+`mounts.sync()` 做差量：新增/变更挂载、删除/停用卸载、失败记 `lastError`。
 
-### 4.2 可见性（已移除）
+### 4.2 连通性测试
 
-> 2026-10-21：按 Workspace 收窄 MCP 可见性/调用的机制（`lib/visibility.js` 的 agent-scope `tools.restrict`
-> 与 `lib/guard.js` 的 `tools/pre-execute` 调用时守卫）已整个删除。所有 MCP server 对 profile 内全部会话生效。
+独立于已挂载 bridge：用 `@modelcontextprotocol/client`（与 bridge 同版本 v2）建 client →
+`connect` → `listTools` → 记录协议版本/serverInfo/工具名/耗时 → 关闭。
+超时与错误分类：`timeout` / `auth` / `transport` / `protocol` / `unknown`。
+stdio 测试会真实启动命令，UI 必须警示。
 
-### 4.3 连通性测试
+### 4.3 粘贴导入
 
-独立于已挂载 bridge：用 `@modelcontextprotocol/client`（与 bridge 同版本 v2）直接建 client（stdio 或 streamable-http），
-`connect` → `listTools` → 记录协议版本、serverInfo、工具名、耗时，关闭连接。
-超时（默认 60s，可传 `timeoutMs`）/ 错误分类：`timeout` / `auth`（401/403）/ `transport` / `protocol` / `unknown`。
-stdio 测试会真实启动命令——UI 必须提示「等价于本机执行命令」。
+`server.import`：解析文本（`mcpServers` 包装 / 裸 map / 单个 server，允许代码围栏与前后说明）→
+字段映射（`type`/`transport` 别名、`sse`→streamable-http + warning、无 type 按 command/url 推断、
+`url`/`serverUrl`/`endpoint`、`headers`/`env`）→ 应用批量默认 `enabled` / `toolCallTimeoutMs`
+（条目自带优先）→ 逐条校验 → 整批一次保存 + 一次 mount sync。
 
-### 4.4 模型侧工具
+`server.importTest`：同一套解析与默认值，但不落盘、不挂载；对每个 server 用独立连接探测，
+最多前 10 个，其余进 `skipped`；单条失败不影响其它条。
 
-保留旧 `mcp_manager_*` 工具（list/add/remove/reload/enable/tools/call/import）。GUI 是主入口，工具保留给 Agent 自管理。
+### 4.4 宿主原生 MCP 发现
 
-### 4.5 外部（宿主配置）MCP 发现
+数据源：`ctx.loader.entries()` 中 `options.name` 为 `@deepseek-ai/dsh-mcp-client`（含相对路径/别名兜底）
+且 `options.config.serverName` 存在的 entry。
 
-插件加载时遍历宿主已有的 DSH 原生 MCP 配置，并在面板中展示（只读）：
+- `active = Boolean(entry.fiber?.uid)`；`disabled = Boolean(entry.options.disabled)`；
+- `scope`：剥离 Loader 的 `include:` 组前缀后，仍含 `:` 的判为 `preset`，否则 `profile`；
+- `source: 'host'`、`readOnly: true`、`entryId`；headers/env 非字符串值转文本并标 `expression: true`（不求值）；
+- 同名先到先得；与 manager 项同名时 mount sync 跳过 manager 项并标 `conflict: 'host'`；
+- Loader 不可用时降级为空列表 + 日志一次；`state` 每次 RPC 重新枚举。
 
-- 数据源：`ctx.loader.entries()` 中 `options.name` 为 `@deepseek-ai/dsh-mcp-client`（或包含该包名）
-  且 `options.config.serverName` 存在的 entry；`entry.fiber?.uid` 判断是否 active；
-  `options.disabled` 判断是否停用；id 含 `:` 的嵌套 entry 标 `scope: 'preset'`，否则 `'profile'`。
-- `state.servers` 合并两类：manager 项 `source:'manager'`；外部项 `source:'host'`、`readOnly:true`、
-  `entryId`、`active`、`scope`。
-- 外部项完全只读：`server.update`/`remove`/`toggle` → `EXTERNAL_READONLY`；同名 `add` → `EXISTS_HOST_CONFIG`。
-  改配置/删除请去 DSH 的 `cordis.patch.yml`。
-- manager manifest 与外部同名时，mount sync 跳过并标 `conflict:'host'`（bridge 同 serverName 重复挂载会失败）。
-- `loader` 服务不可用时降级为空外部列表并日志一次；`state` RPC 每次重新枚举（GUI 5s 轮询）。
+### 4.5 模型工具
+
+`mcp_manager_list` / `add` / `remove` / `reload` / `enable` / `tools` / `call` / `import`。
+GUI 是主入口；工具保留给 Agent 自管理。`add/list` 不含 workspaces 参数；`import` 用于迁移旧
+`@deepseek-ai/dsh-mcp-client` patch row。
 
 ## 5. RPC 契约
 
-宿主注册 `webServer` 前缀路由 `/mcp-manager`，经 `connection.admit(req)` 准入（复制 `dsh-im-manager/src/host/manager-rpc.js` 的模式）。
-客户端 `connection.rpc.call('/mcp-manager', endpoint, payload)`。
-响应统一 `{ ok: true, value }` / `{ ok: false, error: { code, message } }`。
+宿主注册 `webServer` 前缀路由 `/mcp-manager`，`connection.admit(req)` 准入（仅 owner），仅 POST，
+body 上限 2MB；响应 `{ok:true,value}` / `{ok:false,error:{code,message}}`。
 
 | endpoint | payload | value |
 |---|---|---|
-| `state` | — | `{ version, servers: (ServerView & { source: 'manager' \| 'host' })[], status: Record<serverName, ServerStatus> }`；外部项另带 `readOnly/entryId/active/scope`，冲突 manager 项带 `conflict:'host'` |
+| `state` | — | `{ version, servers: ServerView[], status: Record<serverName, ServerStatus> }` |
+| `status` | — | `{ status }` |
 | `server.add` | ServerInput | `{ serverName }` |
 | `server.update` | ServerInput（serverName 定位） | `{ serverName }` |
 | `server.remove` | `{ serverName }` | `{ removed: true }` |
 | `server.toggle` | `{ serverName, enabled }` | `{ enabled }` |
-| `server.test` | ServerInput（可不落盘） | `{ ok, latencyMs, protocolVersion?, serverInfo?, tools: [{name, description?}], error?: { code, message } }` |
-| `server.import` | `{ json: string, replace?: boolean, toolCallTimeoutMs?: number, enabled?: boolean }` | `{ added: string[], skipped: [{ serverName, reason }], warnings: string[] }` |
-| `server.importTest` | `{ json: string, toolCallTimeoutMs?: number, enabled?: boolean }` | `{ results: [{ serverName, ok, latencyMs, protocolVersion?, serverInfo?, tools, error? }], parseErrors: [{ serverName?, message }], skipped: string[] }`（最多测前 10 个） |
-| `status` | — | `{ status }` |
-
-### 5.1 粘贴导入（mcpServers 兼容）
-
-`server.import` 接受常见 MCP 客户端（Claude Desktop / Cursor / VS Code）的粘贴格式：
-
-```json
-{ "mcpServers": { "flomo": { "type": "streamable-http", "url": "https://flomoapp.com/mcp", "headers": { "Authorization": "Bearer 粘贴你的Token" } } } }
-```
-
-- 接受 `mcpServers` 包装、裸 `{ name: {...} }` map、单个 server 对象；
-- 允许前后有说明文字或 ```` ```json ```` 代码围栏（提取第一个平衡的 `{...}`）；
-- `type`/`transport`：`streamable-http` / `http` / `streamableHttp` → streamable-http，`stdio` → stdio，`sse` → streamable-http 并给 warning；
-- 无 type 时按 `command`（stdio）或 `url`（streamable-http）推断；兼容 `url` / `serverUrl` / `endpoint`、`args`、`env`、`cwd`；
-- 逐条校验并新增；已存在且 `replace !== true` 记 `skipped(reason=EXISTS)`；单条失败不影响其它条；
-- 明文 Token 允许（生态惯例），UI 显著提示「可直接用 `env:VAR` 代替」；
-- 额外可选字段 `toolCallTimeoutMs?: number` 与 `enabled?: boolean`：作为整批**默认值**，条目自带时以条目为准。
+| `server.test` | ServerInput，或已保存项的 `{ serverName }` | `{ ok, latencyMs, protocolVersion?, serverInfo?, tools, error? }` |
+| `server.import` | `{ json, replace?, enabled?, toolCallTimeoutMs? }` | `{ added: string[], skipped: [{serverName, reason}], warnings: string[] }` |
+| `server.importTest` | `{ json, enabled?, toolCallTimeoutMs? }` | `{ results: [{serverName, ok, latencyMs, protocolVersion?, serverInfo?, tools, error?}], parseErrors: [{serverName?, message}], skipped: string[] }` |
 
 类型：
 
 ```ts
-ServerView = { serverName, transport, enabled, toolCallTimeoutMs, url?, headers?: [{name,value}]?,
-               command?, args?: string[], env?: [{name,value}]?, cwd? }
-ServerStatus = { mounted: boolean, toolCount: number, lastError: string | null }
-ServerInput = 去掉派生字段的 ServerView（headers/env 接受对象或 entry 数组）
+ServerView = {
+  serverName, transport, enabled, toolCallTimeoutMs,
+  url?, headers?: [{name,value}]?, command?, args?: string[], env?: [{name,value}]?, cwd?,
+  source: 'manager' | 'host',
+  readOnly?, entryId?, active?, disabled?, scope?: 'profile' | 'preset', conflict?: 'host'
+}
+ServerStatus = { mounted: boolean, toolCount: number, lastError: string | null, conflict?: 'host' }
+ServerInput = ServerView 去掉 source/readOnly/entryId/active/disabled/scope/conflict
 ```
 
-## 6. UI（lib/client.js）
+错误码：`INVALID_INPUT`、`FORBIDDEN`、`UNKNOWN_ENDPOINT`、`UNKNOWN_SERVER`、`DUPLICATE_SERVER`、
+`EXISTS_HOST_CONFIG`、`EXTERNAL_READONLY`、`ENV_MISSING`、`CREDENTIAL_MISSING`、
+`CREDENTIAL_UNAVAILABLE`、`CREDENTIAL_RESOLVE_FAILED`、`MCP_MANAGER_ERROR`。
 
-- 面板 id `mcp-manager`；`sidebar.panellist` order 6，label「MCP」；`main` key `mcp-manager`。
-- 页面结构（对齐「消息」页 `dim-page`）：
-  - 页头：标题「MCP」+ 说明 + 工具条（刷新、添加 MCP）；
-  - 面板图标：插头（plug）SVG，侧栏入口/列表行/详情卡共用；
-  - 列表：状态点（已连接绿 / 已挂载未连接黄 / 错误红 / 停用灰）、名称、transport 徽标、目标（url 或命令）、工具数；外部项带「来自 DSH 配置」徽标，冲突项带 warn 徽标；
-  - 详情：只读字段 + 操作（测试连接、编辑、停用/启用、删除）；外部项隐藏编辑/启停/删除，改为「请到 cordis.patch.yml 修改」提示；
-  - 「添加 MCP」弹窗：顶部 tab 切换「手动配置 / 代码粘贴」；编辑已有 server 时标题「编辑 <name>」且只有手动配置；
-    - 手动配置：serverName、transport 选择、url 或 command/args/cwd、headers/env 键值编辑器；
-    - 代码粘贴：`mcpServers` JSON + 覆盖开关（见 §5.1）；
-    - 配置区与「其他设置」之间一条分割线；其他设置 = 工具调用超时、启用开关、连接测试（手动走 `server.test`，粘贴走 `server.importTest`，结果按 server 展示，不落盘）；
-  - 测试结果区：成功（延迟、协议、工具数、工具名可展开）/ 失败（错误分类与消息）。
-- 轮询 `state`（约 5s，弹窗打开时暂停）；刷新按钮即时拉取。
-- 纯手写 `lib/client.js`（`window.__ModuleLoader__.load` + `h()`，无 JSX、无外部依赖）；复用 `@deepseek-ai/dsh-client-ui-primitives` 与 `--dsw-alias-*` token；深色模式必须正常。
+## 6. UI（`lib/client.js`）
 
-## 7. 文件布局与职责
+- 面板：`sidebar.panellist`（id `mcp-manager`，order 6，label「MCP」，plug 图标）+ `main`（key `mcp-manager`）；
+- 列表页：页头（标题 / 一行统计 / 工具条「刷新 · 添加 MCP」）+ 列表行（状态点、名称、transport、目标、工具数、
+  manager 项启用开关；host 项「来自 DSH 配置」徽标，冲突项 warn 徽标）；
+- 详情：配置、env/headers、连接测试、编辑、停用/启用、删除；host 项隐藏编辑/启停/删除并提示去 `cordis.patch.yml`；
+- 「添加 MCP」弹窗：
+  - add 模式顶部 tab「手动配置 / 代码粘贴」；edit 模式标题「编辑 <name>」且只有手动配置；
+  - 手动：名称、transport（默认 streamable-http）、URL 或命令/参数/工作目录、请求头/环境变量（默认一行空白）；
+  - 粘贴：一行说明 + 8 行等宽 textarea（缩进示例）+ 覆盖 checkbox；
+  - 配置区与「连接测试」之间一条分割线；连接测试按钮 + 结果区（手动走 `server.test`，粘贴走 `server.importTest`）；
+  - add 模式不提供启用/超时（默认 true / 60000）；edit 模式提供这两项（唯一入口）；
+  - 底部按钮统一「取消」+「添加 MCP」（edit 为「保存修改」）；
+- 等高机制：add 模式两个 tab 的配置面板同时渲染，`display:grid; grid-template-rows:1fr`，
+  两个面板 `grid-area:1/1` 同格叠放；非激活面板 `visibility:hidden`（保留占位、不可聚焦），
+  行高 = 两者自然高度最大值 → 切换 tab 高度零跳动、无内部滚动；
+- 规范：间距 4/8/12/16/24（字段间 14）；文字层级（20/28 标题、13/20 说明、14/20 区块标题、13/18 标签、12/18 hint）；
+  只用 `--dsw-alias-*` token，深色模式一致。
+
+## 7. 文件布局
 
 ```
 dsh-mcp-manager/
-  package.json            # Lead
-  cordis.patch.yml        # Lead（bundle 层，insert mcp-manager 行）
-  DESIGN.md               # Lead
-  lib/index.js            # host 插件入口（扩展旧实现）      host-core
-  lib/manifest.js         # manifest v2 读写/规范化          host-core
-  lib/mount.js            # bridge 挂载/卸载/状态            host-core
-  lib/probe.js            # 连通性测试                       host-core
-  lib/rpc.js              # /mcp-manager RPC 分发            host-core
-  lib/client.js           # 客户端页面                       client-ui
-  test/unit/**            # 单测                             host-core
-  test/client/**          # client 语法/静态检查             client-ui
-  test/e2e/**             # 隔离 profile 验证                verify
-  install/**              # 真机安装/回滚 + 隔离验证脚本      verify
+  package.json          # 0.3.0，MIT，dsh.bundle / dsh.client
+  cordis.patch.yml      # profile bundle 层（insert mcp-manager 行）
+  lib/index.js          # Cordis 入口：Config/apply、模型工具、/mcp-manager RPC、生命周期
+  lib/manifest.js       # manifest 校验/规范化/原子 0600、旧字段剥离、引用解析、toolCount 归属
+  lib/mount.js          # bridge 差分挂载/卸载、lastError
+  lib/probe.js          # 独立 MCP 客户端连通性测试
+  lib/import.js         # 粘贴解析/映射/批量默认/批量测试
+  lib/external.js       # 宿主原生 row 发现（只读、scope/conflict）
+  lib/rpc.js            # RPC 端点校验/分发
+  lib/patch-import.js   # 旧 patch row 迁移
+  lib/client.js         # 浏览器半（原生页面）
+  install/              # activate.sh（文件级安装/卸载）、verify-plugin.sh（隔离验证）
+  test/unit/            # 纯逻辑单测（fake 依赖）
+  test/client/          # 静态检查 + stub-React 渲染 smoke
+  test/e2e/             # 隔离 DSH_HOME 的端到端脚本 + fixtures
 ```
 
 ## 8. 验证
 
-1. 单测（`node --test`）：manifest 规范化/旧字段剥离、密钥 codec、前缀归属/toolCount、probe 错误分类、RPC 分发（fake manager）。
-2. 隔离 profile（真实 CLI + web 模板）：启动本插件，断言 apply 成功、RPC 端点形状、旧 manifest 字段被剥离、密钥不可用路径不落明文、无 dispose 报错。
-3. e2e：安装/卸载契约、粘贴导入、原生 row 发现、clean reinstall、密钥加密、启动验证。
-4. 真机：`plugin_manager install_bundle`（绝对包路径）→ 重启 Desktop → 添加一个测试 server（如 `npx -y mcp-server-fetch` 或 unifuncs）→ 测试连接 → 新会话验证工具可见。
+1. **host 单测** `node --test 'test/unit/*.test.mjs'`：manifest 校验/旧字段剥离、引用解析、blank-keep、
+   mount 差分、probe 分类、RPC 分发、external 发现/冲突、import/importTest。
+2. **client** `bash test/client/run.sh`：`node --check`、注册/契约静态断言、stub-React 渲染分支。
+3. **隔离 e2e** `bash test/e2e/run-all.sh`（临时 `DSH_HOME` + `--from-default-profile web`）：
+   install 契约、启动/工具注册/dispose、RPC 导入、importTest、原生 row 发现、clean reinstall、references。
+4. **启动验证** `bash install/verify-plugin.sh`：真实 CLI 下 loader entry active、8 个模型工具、client 半被发现、dispose 干净。
 
-## 9. 安全
+## 9. 安全边界
 
-- manifest 0600；密钥优先 `env:NAME`，UI 注明「直接填写会明文落盘」。
-- stdio = 执行用户命名的命令，UI 必须警示。
-- RPC 仅同源 + `connection.admit`；不做跨 profile 写。
-- 不写 profile 文件、不动 `~/.dsh/profiles/**`（安装由用户批准后单独执行）。
+- stdio server 以用户权限执行命令，等价本机执行；
+- manifest 0600；`env:` / `credential:` 引用避免明文落盘；明文仍是明确允许的选择；
+- 不自建加密：同用户进程（包括 agent）可读宿主可读内容，插件级加密不构成边界，且带来 provider/迁移成本；
+- RPC 仅同源 owner，body 2MB；插件不写 profile 文件（安装脚本除外）。
+
+## 10. 已移除的设计（历史）
+
+- **2026-10-21：按 Workspace 划分可见性/调用**。曾用 `agent.ctx.tools.restrict` + `tools/pre-execute` 守卫
+  按工作区收窄；后因 manager 工具/资源工具等多路径绕过、且维护成本高，整套移除。
+  现在 MCP 对 profile 内所有会话生效。
+- **2026-10-21：自建 key 加密**。曾用 `enc:v1:` + Electron safeStorage / macOS Keychain 主密钥；
+  实测同用户进程可直接读出主密钥，对 agent 不构成边界，只防文件副本泄露，且引入 provider 失败与迁移不可逆，
+  改为 `env:` / `credential:` 引用 + 0600 明文。
+
+## 11. 已知限制
+
+- `failOnStartupError: false`：初始连接失败的 server 显示 `mounted: true / toolCount: 0`（黄点）；
+- 宿主发现依赖 Loader 当前条目；运行中新增宿主行会反映在 `state`，同名冲突在下次 mutation/重启时 reconcile；
+- 不处理 OAuth；不管理 stdio server 的包安装；粘贴测试一次最多前 10 个。

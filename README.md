@@ -1,82 +1,136 @@
 # dsh-mcp-manager
 
-DSH Desktop 的 **MCP 管理插件**：在左侧栏「MCP」页面里可视化增删改 MCP server、做连通性测试、
-粘贴 `mcpServers` JSON 导入；header/env 支持 `env:` / `credential:` 引用。
+DeepSeek Harness（DSH）Desktop 的原生 **MCP 管理插件**：在左侧栏「MCP」面板里可视化管理 MCP server，
+不用再手写 profile patch。
 
-- 连接挂在 **profile 级**（一个宿主进程一份，经 `@deepseek-ai/dsh-mcp-client` 动态挂载）；
-- server 对 profile 内**所有会话/所有工作区生效**（按工作区划分作用范围的机制已于 2026-10-21 移除）；
-- 不靠改 patch 文件加 server：manifest 独立持久化，改完即时挂载/卸载，不热重载插件树。
+- **profile 级**：一个宿主进程一份连接，`desktop` profile 内所有会话共享同一套 MCP；
+- **独立注册表**：manifest 落在 `$DSH_HOME/mcp-manager.json`，增删改即时挂载/卸载，不改 patch、不热重载插件树；
+- **原生 GUI**：原生 React 页面（非 iframe），复用 DSH 的侧栏/弹窗/主题 token；
+- **密钥两种存法**：`env:NAME` / `credential:NAME` 引用（推荐），或 0600 manifest 明文；
+- 当前版本 **0.3.0**，目标运行时 DSH **0.2.1-rc.2**、Node **>=22**。
 
-设计细节与契约见 [DESIGN.md](DESIGN.md)。
+## 功能
 
-## 界面
+- **列表**：状态点（已连接 / 已挂载未连接 / 错误 / 停用）、名称、transport、目标（URL 或命令）、工具数、启用开关；
+- **添加 MCP**：唯一入口，弹窗内切换「手动配置 / 代码粘贴」；配置区下方是「连接测试」（不落盘）；
+  新建默认启用、默认 60000ms 超时；
+- **编辑**：修改配置；「工具调用超时」「启用该 server」只在编辑弹窗里可改；
+- **连通性测试**：握手 + `tools/list` + 延迟 + 错误分类（timeout / auth / transport / protocol / unknown）；
+- **粘贴导入**：兼容 Claude Desktop / Cursor / VS Code 的 `mcpServers` JSON，支持整批导入与逐条测试；
+- **宿主已有 MCP 发现**：只读展示 DSH 原生 `@deepseek-ai/dsh-mcp-client` row（`source:'host'`），同名冲突可见；
+- **Agent 自管理工具**：8 个 `mcp_manager_*` 工具（见下）。
 
-「消息」旁边一个「MCP」入口（`sidebar.panellist` + `main`，原生 React，不嵌 iframe）。包含：
+## 环境要求
 
-- 列表：状态点（已连接 / 已挂载未连接 / 错误 / 停用）、名称、transport、目标（URL 或命令）、工具数、启用开关；
-- 详情：完整配置、env/headers、连通性测试（延迟 / 协议 / 工具列表）、编辑、停用、删除；
-- 添加弹窗：唯一的「添加 MCP」入口，弹窗内切换「手动配置 / 代码粘贴」；配置区下方是「连接测试」（不落盘），
-  新建默认启用、默认 60000ms 超时（超时/启用只在编辑弹窗里可改）。
-
-仓库：<https://github.com/iswilliamleeya/dsh-mcp-manager>
+| 项 | 要求 |
+|---|---|
+| DSH | Desktop 0.2.1-rc.2，profile 名为 `desktop` |
+| Node | >= 22（DSH 宿主内置运行时） |
+| 平台 | host 插件本身无平台依赖；`install/verify-plugin.sh` 默认使用 macOS App 内 CLI，其他平台用 `DSH_CLI` 覆盖 |
 
 ## 安装
 
-从 GitHub 获取后，两种等价方式：
+### 方式一：文件级安装（推荐，回滚简单）
 
-1. **文件级**（已在本机验证 client 半可被发现，回滚简单）：
+```bash
+git clone git@github.com:iswilliamleeya/dsh-mcp-manager.git
+cd dsh-mcp-manager
 
-   ```bash
-   bash install/activate.sh                 # 默认 desktop profile
-   bash install/activate.sh --remove        # 回滚
-   ```
+# 默认写入 desktop profile；脚本默认拒绝写真实 ~/.dsh，需要显式放行
+DSH_MCP_MANAGER_ALLOW_REAL=1 bash install/activate.sh
 
-   复制包到 `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager`，把本包的
-   `cordis.patch.yml` insert row 追加到 profile patch 层（带时间戳备份、重复守卫）。
+# 卸载（只删 patch 行，MCP 配置保留）
+DSH_MCP_MANAGER_ALLOW_REAL=1 bash install/activate.sh --remove
+```
 
-2. **profile bundle**：`plugin_manager` `install_bundle`，target 用本包的绝对路径。
+脚本做的事：复制包到 `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager`，
+把本包 `cordis.patch.yml` 的 insert row 追加到 profile patch 层（带时间戳备份、重复守卫）。
 
-> 两种方式都会让 patch watcher 重载组合，**可能中断正在运行的会话**；安装后重启 DSH，
-> 新开一个会话验收。脚本默认拒绝写真实 `~/.dsh`，需显式 `DSH_MCP_MANAGER_ALLOW_REAL=1`。
+### 方式二：profile bundle
 
-**卸载与数据**：`--remove` 只删 patch 行（package 留着），MCP 配置不受影响；卸载/重装插件
-**不会删除** `$DSH_HOME/mcp-manager.json`。只有显式删除这个文件才会丢配置——隔离实验已验证：
-卸载（删 row/node_modules）后重装会自动恢复全部 server；连 manifest 一起删则列表归零。
-「来自 DSH 配置」的自动发现只针对 DSH 原生 `@deepseek-ai/dsh-mcp-client` row，救不了被删的 manifest。
+用 `plugin_manager` 的 `install_bundle`，target 指向本包绝对路径。
+
+> 两种方式都会让 patch watcher 重载组合，**可能中断正在运行的会话**；安装后重启 DSH 生效。
+> 安装后 client 半通过 `dsh.client` 自动被发现，无需改 `dsh.profile.bundles`。
+
+### 数据与卸载
+
+- 卸载/重装插件**不会删除** `$DSH_HOME/mcp-manager.json`；
+- 只有显式删除该文件才会丢 MCP 配置（隔离实验已验证：卸载插件保留 manifest 重装后 server 自动恢复）；
+- 旧版本遗留的 `workspaces` / `externalScopes` 字段会在启动时被忽略并一次性原子剥离。
 
 ## 使用
 
-1. 左侧栏点「MCP」→ 右上角「添加 MCP」；
-2. 弹窗顶部切换「手动配置 / 代码粘贴」：
-   - 手动配置：填 `serverName`（`[A-Za-z0-9_-]{1,32}`，决定工具前缀 `mcp__<name>__`）和 transport；
-     - `streamable-http`：URL + 可选 headers（如 `Authorization: env:MCP_TOKEN`）；
-     - `stdio`：命令 + 参数（如 `npx -y mcp-server-fetch`）——**等价于在本机执行该命令**；
-   - 代码粘贴：粘贴常见 MCP 客户端的 `mcpServers` 配置：
+### 添加 MCP
 
-     ```json
-     { "mcpServers": { "flomo": { "type": "streamable-http", "url": "https://flomoapp.com/mcp", "headers": { "Authorization": "Bearer 粘贴你的Token" } } } }
-     ```
+1. 左侧栏「MCP」→ 右上角「添加 MCP」；
+2. 弹窗顶部切换模式：
 
-     支持 `mcpServers` 包装 / 裸 map / 单个 server；`sse` 按 streamable-http 处理；
-     直接粘贴的 Token 会明文落盘，想要更安全可写 `env:VAR` 并从宿主环境读取；
-3. 配置区下方分割线后的「其他设置」：工具调用超时、启用开关、连接测试
-   （手动模式测当前表单；粘贴模式按 server 逐条测，不落盘）；
-4. 保存后，在新会话里使用 `mcp__<serverName>__<tool>`（已有会话按 `tools/change` 下一次 step 生效）。
+**手动配置**
 
-## 宿主已有的 MCP（自动发现）
+- 服务器名称（`[A-Za-z0-9_-]{1,32}`，会成为工具前缀 `mcp__<name>__`）；
+- 传输方式默认 `streamable-http`，可切 `stdio`；
+  - `streamable-http`：URL + 可选请求头；
+  - `stdio`：命令、参数（每行一个）、工作目录、环境变量；stdio 会真实执行命令，只添加可信来源；
+- 请求头/环境变量默认给一行空白，可增删；值支持 `env:NAME` / `credential:NAME` 引用；
+- 配置区下方「连接测试」：测试当前表单，不保存；
+- 新建默认 `enabled: true`、`toolCallTimeoutMs: 60000`（不在添加弹窗里配置，编辑时可改）。
 
-插件加载时会遍历宿主已经配置的 DSH 原生 MCP（`@deepseek-ai/dsh-mcp-client` loader row），
-把它们一起列在面板里，徽标「来自 DSH 配置」：
+**代码粘贴**
+
+```json
+{
+  "mcpServers": {
+    "flomo": {
+      "type": "streamable-http",
+      "url": "https://flomoapp.com/mcp",
+      "headers": {
+        "Authorization": "Bearer 粘贴你的Token"
+      }
+    }
+  }
+}
+```
+
+- 支持 `mcpServers` 包装 / 裸 map / 单个 server；`type` 缺省时按 `command`（stdio）或 `url`（streamable-http）推断；
+- `http`、`sse` 按 streamable-http 处理；
+- 同名默认跳过（`EXISTS`），勾选「覆盖已存在的 server」可覆盖；
+- 「连接测试」对粘贴内容逐条探测（最多前 10 个，其余提示未测试），不落盘；
+- 粘贴里的明文 Token 会写入 manifest（0600）；建议在 JSON 里写 `env:NAME` / `credential:NAME`。
+
+### 编辑 / 停用 / 删除
+
+- 详情页：完整配置、env/headers、测试连接、编辑、停用/启用、删除（删除立即卸载）；
+- 编辑弹窗：改配置，并且是「工具调用超时」「启用该 server」的唯一入口；
+- 已有 header/env 行**留空保存 = 保持原值**，删除该行 = 删除该 entry。
+
+### 密钥与引用
+
+manifest 里 header/env 的值支持三种形态：
+
+| 形式 | 解析 |
+|---|---|
+| `credential:NAME` | 通过 `ctx.credentials` 从 DSH 凭据库（`$DSH_HOME/.credentials.yaml`，0600）读取 |
+| `env:NAME` | 从宿主 `process.env` 读取（`$DSH_HOME/.env` / 启动环境） |
+| 其它 | 明文，直接存储在 manifest（0600） |
+
+- 引用在挂载/测试时解析；`state` 里原样返回引用字符串，不展开；
+- 解析失败写 `lastError`（`ENV_MISSING` / `CREDENTIAL_*`），不会崩宿主；
+- **本插件不做自建加密**：同用户进程（包括 agent 的 shell）能读宿主可读的一切，静态加密只防「配置文件被单独拷走」，
+  代价是 provider 依赖/迁移不可逆。需要更强隔离请用独立的 OS 账户/沙箱；设备丢失请用 FileVault。
+
+### 宿主已有的 MCP
+
+插件加载时会遍历宿主已配置的 DSH 原生 MCP（`@deepseek-ai/dsh-mcp-client` loader row），
+以「来自 DSH 配置」徽标只读展示：
 
 - 状态、工具数、连通性测试与 manager 自己管理的 server 一致；
-- 配置**只读**：修改/删除请到 DSH 的 `cordis.patch.yml`（桌面 profile 是
-  `~/.dsh/profiles/desktop/cordis.patch.yml`，home 级是 `~/.dsh/cordis.patch.yml`）；
-- 完全只读，不能编辑/启停/删除，也不参与作用域配置；
-- 与 manager 自己添加的 server 同名时不会重复挂载，列表会标记冲突。
+- 配置**完全只读**：编辑/启停/删除请去 DSH 的 `cordis.patch.yml`；
+- 与 manager 添加的同名 server 冲突时不会重复挂载，列表标记「与宿主配置重名」。
 
-## Manifest
+## 数据（manifest）
 
-默认 `$DSH_HOME/mcp-manager.json`（0600，原子写；插件配置 `manifestFile` 可覆盖）。
+默认路径 `$DSH_HOME/mcp-manager.json`（插件配置 `manifestFile` 可覆盖），原子写、权限 0600：
 
 ```json
 {
@@ -93,61 +147,96 @@ DSH Desktop 的 **MCP 管理插件**：在左侧栏「MCP」页面里可视化�
       "cwd": ""
     },
     {
-      "serverName": "unifuncs",
+      "serverName": "flomo",
       "transport": "streamable-http",
       "enabled": true,
-      "toolCallTimeoutMs": 900000,
-      "url": "https://mcp.unifuncs.com/mcp",
-      "headers": { "Authorization": "env:MCP_UNIFUNCS_API_KEY" }
+      "toolCallTimeoutMs": 60000,
+      "url": "https://flomoapp.com/mcp",
+      "headers": {
+        "Authorization": "credential:FLOMO_TOKEN"
+      }
     }
   ]
 }
 ```
 
-- `env:NAME` 在挂载/测试时从宿主环境解析；失败只记 `lastError`，不会崩宿主。
-- 值可以写 `env:NAME`（宿主环境）或 `credential:NAME`（DSH 凭据库）；直接写明文会存进 manifest（0600）。
-- 旧版本 manifest 里可能残留的 `workspaces` / `externalScopes` 会在启动时被忽略并一次性重写剥离（按用户决定不保留）。
+> 引用是**整值替换**：`credential:FLOMO_TOKEN` 对应的凭据值需要包含完整 header 值（例如 `Bearer xxx`），`env:` 同理。
 
-## 模型工具（Agent 自管理入口）
+## RPC（GUI 与宿主）
 
-`mcp_manager_list` / `add` / `remove` / `reload` / `enable` / `tools` / `call` / `import`。
-GUI 是主入口；这些工具保留给 Agent 自动化。
+同源 `POST /mcp-manager/<endpoint>`，经 `connection.admit` 准入（仅 owner），body 上限 2MB；
+响应 `{ok:true,value}` / `{ok:false,error:{code,message}}`。完整契约见 [DESIGN.md](DESIGN.md)。
+
+| endpoint | 说明 |
+|---|---|
+| `state` | `{version, servers, status}`（含宿主发现项与冲突标记） |
+| `status` | 仅状态映射，供轮询轻量刷新 |
+| `server.add` / `server.update` / `server.remove` / `server.toggle` | 增删改与启停 |
+| `server.test` | 测当前表单或已保存配置（只传 `serverName`） |
+| `server.import` | 粘贴导入，`{json, replace?, enabled?, toolCallTimeoutMs?}` |
+| `server.importTest` | 批量探测粘贴内容，不落盘，最多 10 个 |
+
+## 模型工具
+
+| 工具 | 用途 |
+|---|---|
+| `mcp_manager_list` | 列出 registry + 状态 |
+| `mcp_manager_add` | 新增并立即挂载 |
+| `mcp_manager_remove` | 卸载并删除 |
+| `mcp_manager_reload` | 就地重建连接（HTTP session 过期时） |
+| `mcp_manager_enable` | 启停 |
+| `mcp_manager_tools` | 用管理器的独立连接列出某 server 的工具 |
+| `mcp_manager_call` | 调用任意 server 的任意工具 |
+| `mcp_manager_import` | 从 `@deepseek-ai/dsh-mcp-client` patch row 迁移 |
 
 ## 架构
 
 ```
-lib/index.js        Cordis 入口：Config/apply，工具注册，/mcp-manager RPC，生命周期
-lib/manifest.js     manifest v2 校验/规范化/0600 原子写/旧字段剥离/toolCount 归属
-lib/mount.js        bridge 差分挂载/卸载，lastError
-lib/import.js       粘贴 mcpServers JSON 解析/映射
+lib/index.js        Cordis 入口：Config/apply、工具注册、/mcp-manager RPC、生命周期
+lib/manifest.js     manifest 校验/规范化/0600 原子写、旧字段剥离、引用解析、toolCount 归属
+lib/mount.js        bridge 差分挂载/卸载、lastError
+lib/import.js       粘贴 mcpServers 解析/映射/默认值/批量测试
 lib/external.js     宿主原生 dsh-mcp-client row 发现（只读）
-lib/probe.js        独立 MCP 客户端连通性测试（不改动已挂载连接）
-lib/rpc.js          RPC 端点分发
+lib/probe.js        独立 MCP 客户端连通性测试
+lib/rpc.js          RPC 端点校验与分发
+lib/patch-import.js 旧 patch row 导入
 lib/client.js       浏览器半：原生「MCP」页面
 cordis.patch.yml    profile bundle 层（insert mcp-manager 行）
-install/            文件级安装/卸载 + 隔离 profile 验证脚本
+install/            文件级安装/卸载 + 隔离 profile 验证
 test/               unit / client / e2e
 ```
 
 ## 测试
 
 ```bash
-node --test 'test/unit/*.test.mjs'      # 111 pass
-bash test/client/run.sh                  # 18 static + 23 render smoke
-bash test/e2e/run-all.sh                 # 8 组隔离 profile e2e（含安装/启动/导入/发现/清理/引用）
-bash install/verify-plugin.sh            # 隔离 DSH_HOME + web 模板启动验证
+node --test 'test/unit/*.test.mjs'   # 111 pass
+bash test/client/run.sh               # 18 static + 23 render smoke
+bash test/e2e/import-test-smoke.sh    # 单步示例（需要 DSH CLI）
+bash test/e2e/run-all.sh              # 全部隔离 e2e（8 步）
+bash install/verify-plugin.sh         # 隔离 DSH_HOME + web 模板启动验证
 ```
+
+隔离 e2e 全部使用临时 `DSH_HOME`，不碰真实 Desktop profile / `~/.dsh`；`KEEP=1` 可保留证据目录。
 
 ## 安全
 
-- `stdio` server 会以你的权限执行你填写的命令——只添加你信任的 server。
-- **header/env 密钥**：优先用 `env:NAME`（宿主环境 / `$DSH_HOME/.env`）或 `credential:NAME`（DSH 凭据库）引用，manifest 里不落明文；直接写明文也可以，但会存进 `mcp-manager.json`（0600）。
-- 不再有自建加密：同用户进程（包括 agent 自己的 shell）本来就能读到宿主可读的一切，静态加密只防「配置文件被单独拷走」，代价是 provider 依赖/迁移不可逆；设备丢失请用 FileVault。
-- manifest 0600；RPC 只接受同源 owner peer，body 上限 2MB。
-- 插件不写 profile 文件（安装脚本除外），删除 server 只动自己的 manifest。
+- `stdio` server 会以你的权限执行你填写的命令——只添加你信任的可执行文件与参数；
+- manifest 0600；优先 `env:` / `credential:` 引用，避免明文落盘；
+- RPC 仅同源 owner peer，body 上限 2MB；
+- 设备级加密请使用 FileVault（本插件不做密钥加密）。
 
 ## 已知限制
 
-- 隔离环境无法验证真实第三方 MCP server 的 `server.test` 与成功挂载后的工具计数（需真机首测）。
-- `failOnStartupError: false`：初始连接失败的 server 表现为 `mounted=true / toolCount=0`，UI 显示黄点。
-- 不处理 OAuth 流程（HTTP server 目前用 header/`env:` 承载凭据）。
+- `failOnStartupError: false`：初始连接失败的 server 表现为 `mounted: true / toolCount: 0`，UI 显示黄点；
+- 不处理 OAuth 流程（远程 MCP 目前用 header / `env:` 承载凭据）；
+- 宿主发现依赖 Loader 当前条目；运行中新增宿主行会反映到 `state`，同名冲突在下次 mutation/重启时 reconcile；
+- 粘贴测试会真实连接/启动命令；一次最多测试前 10 个。
+
+## 变更记录
+
+- **0.3.0**：单一「添加 MCP」弹窗（手动/粘贴 tab + 连接测试）、请求头默认一行、两个 tab 自动等高；
+  移除按工作区划分作用域；移除自建 key 加密，改为 `env:` / `credential:` 引用 + 0600 明文。
+
+## License
+
+[MIT](LICENSE)

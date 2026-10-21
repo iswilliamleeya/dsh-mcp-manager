@@ -2,12 +2,9 @@
 #
 # Mounts the MCP manager host plugin: a persisted registry of MCP servers that
 # are mounted through the in-box bridge (@deepseek-ai/dsh-mcp-client), a
-# per-workspace visibility policy, and a same-origin RPC channel (/mcp-manager)
-# for the native Desktop page contributed by lib/client.js.
-#
-# Workspace scope model: connections are profile-wide; each server may list
-# workspace ids it applies to (empty = every workspace). Sessions in other
-# workspaces do not see that server's tools.
+# same-origin RPC channel (/mcp-manager) for the native Desktop page contributed
+# by lib/client.js, discovery of host-configured MCP rows, and connectivity
+# tests. Servers are profile-wide: every session shares the same registry.
 - insert:
     - id: mcp-manager
       name: dsh-mcp-manager
