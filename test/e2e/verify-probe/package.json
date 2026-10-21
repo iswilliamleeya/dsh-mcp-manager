@@ -1,0 +1,11 @@
+{
+  "name": "dsh-mcp-verify-probe",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Isolated-profile liveness probe for dsh-mcp-manager: asserts the loader entry is active, its model tools are registered, and disposal throws nothing.",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  }
+}
