@@ -176,6 +176,46 @@ export async function apply(ctx) {
       report.clientBundlePathError = err(e);
     }
 
+    // Installed-plugins list: the Desktop 插件 → 已安装插件 page reads
+    // pluginManager.listBundles() from the profile manifest. Capture the row for
+    // this package so the verify script can prove the bundle registration is
+    // visible to that surface, not merely present on disk.
+    try {
+      const manager = await new Promise((resolve) => {
+        let settled = false;
+        const done = (value) => {
+          if (settled) return;
+          settled = true;
+          resolve(value);
+        };
+        try {
+          ctx.inject(['pluginManager'], (injected) => done(injected.pluginManager ?? null));
+        } catch {
+          done(null);
+        }
+        setTimeout(() => done(null), 5_000);
+      });
+      report.pluginManagerAvailable = manager !== null && manager !== undefined
+        && typeof manager.listBundles === 'function';
+      if (report.pluginManagerAvailable) {
+        const rows = await manager.listBundles();
+        const row = (rows ?? []).find((entry) => entry?.name === TARGET_NAME) ?? null;
+        report.pluginManagerRow = row === null ? null : {
+          name: row.name,
+          version: row.version ?? null,
+          installed: row.installed ?? null,
+          enabled: row.enabled ?? null,
+          availability: row.availability ?? null,
+          removable: row.removable ?? null,
+          description: row.description ?? null,
+          source: row.source ?? null,
+          error: row.error ?? null,
+        };
+      }
+    } catch (e) {
+      report.pluginManagerError = err(e);
+    }
+
     try {
       const dshHome = process.env.DSH_HOME;
       report.dshHomeFiles = dshHome

@@ -3,9 +3,13 @@
 # without touching the live app profile or its patch layer.
 #
 # It creates a throwaway DSH_HOME, materializes the shipped `web` profile, installs
-# this package with install/activate.sh, adds a liveness probe as the last patch row,
-# boots the profile with stdin closed, and asserts:
+# this package with install/activate.sh **as a profile bundle**, adds a liveness
+# probe as a patch row, boots the profile with stdin closed, and asserts:
 #
+#   - the bundle registration is visible: profile package.json has the dependency
+#     and dsh.profile.bundles entry, --dump-config contains the dsh-mcp-manager
+#     bundle layer, and pluginManager.listBundles() returns an installed+enabled
+#     row for it (the Desktop 插件 → 已安装插件 list surface);
 #   - the manager's loader entry exists and its fiber is ACTIVE (apply succeeded);
 #   - the manager registered its model-facing `mcp_manager_*` tools;
 #   - disposing the manager fiber throws nothing and unwinds its tool registrations;
@@ -88,25 +92,70 @@ if ! DSH_HOME="$HOME_DIR" DSH_PROFILE="$PROFILE" bash "$ROOT/install/activate.sh
 fi
 tail -n 3 "$TMP/activate.log" | sed 's/^/   /'
 
-echo "3/6 idempotency: re-run activate.sh, expect the row to stay single"
+PACKAGE_JSON="$HOME_DIR/profiles/$PROFILE/package.json"
+
+echo "3/6 bundle registration: package.json dependency + bundles, no legacy patch row"
+node - "$PACKAGE_JSON" "$PATCH" <<'NODE'
+const fs = require('node:fs');
+const [packageJson, patch] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(packageJson, 'utf8'));
+const dependency = (manifest.dependencies ?? {})['dsh-mcp-manager'];
+const bundles = (manifest.dsh?.profile?.bundles ?? []);
+const problems = [];
+if (dependency !== 'github:iswilliamleeya/dsh-mcp-manager') problems.push(`dependency=${JSON.stringify(dependency)}`);
+if (bundles.filter((name) => name === 'dsh-mcp-manager').length !== 1) problems.push(`bundle count=${bundles.filter((name) => name === 'dsh-mcp-manager').length}`);
+if (!bundles.includes('@deepseek-ai/dsh-base') || !bundles.includes('@deepseek-ai/dsh-web-app')) problems.push('base/web bundles were dropped');
+const patchText = fs.readFileSync(patch, 'utf8');
+if (/^\s*- id: mcp-manager$/m.test(patchText)) problems.push('legacy mcp-manager patch row still present');
+if (problems.length) { console.error(`FAIL: bundle registration: ${problems.join('; ')}`); process.exit(1); }
+NODE
+[ $? -eq 0 ] || { echo "FAIL: bundle registration assertions failed" >&2; cat "$PACKAGE_JSON" >&2; cat "$PATCH" >&2; exit 1; }
+echo "   OK: dependency + dsh.profile.bundles registered, legacy patch row absent"
+
+echo "   composed config contains the bundle layer"
+if ! child_env "$CLI" "$PROFILE" --dump-config >"$TMP/dump.txt" 2>"$TMP/dump.err"; then
+  echo "FAIL: --dump-config after install failed" >&2; cat "$TMP/dump.err" >&2; exit 1
+fi
+grep -q "^# == dsh-mcp-manager$" "$TMP/dump.txt" || { echo "FAIL: dump-config has no '# == dsh-mcp-manager' bundle layer" >&2; exit 1; }
+grep -q "^- id: mcp-manager$" "$TMP/dump.txt" || { echo "FAIL: dump-config has no '- id: mcp-manager' row" >&2; exit 1; }
+echo "   OK: --dump-config shows '# == dsh-mcp-manager' + '- id: mcp-manager'"
+
+echo "3b/6 idempotency: re-run activate.sh, expect no duplicates and the legacy row to stay gone"
 DSH_HOME="$HOME_DIR" DSH_PROFILE="$PROFILE" bash "$ROOT/install/activate.sh" >"$TMP/activate2.log" 2>&1 || {
   echo "FAIL: second activate.sh run failed" >&2
   cat "$TMP/activate2.log" >&2
   exit 1
 }
-ROW_COUNT="$(grep -cE '^[[:space:]]*- id: mcp-manager$' "$PATCH")"
-[ "$ROW_COUNT" = "1" ] || { echo "FAIL: expected 1 mcp-manager row after reinstall, got $ROW_COUNT" >&2; cat "$PATCH" >&2; exit 1; }
-grep -q "SKIP: 'mcp-manager' row already present" "$TMP/activate2.log" || {
-  echo "FAIL: second activate.sh run did not report the duplicate guard" >&2
+node - "$PACKAGE_JSON" "$PATCH" <<'NODE'
+const fs = require('node:fs');
+const [packageJson, patch] = process.argv.slice(2);
+const manifest = JSON.parse(fs.readFileSync(packageJson, 'utf8'));
+const dependency = (manifest.dependencies ?? {})['dsh-mcp-manager'];
+const bundles = (manifest.dsh?.profile?.bundles ?? []);
+const problems = [];
+if (dependency !== 'github:iswilliamleeya/dsh-mcp-manager') problems.push(`dependency=${JSON.stringify(dependency)}`);
+if (bundles.filter((name) => name === 'dsh-mcp-manager').length !== 1) problems.push(`bundle count=${bundles.filter((name) => name === 'dsh-mcp-manager').length}`);
+if (/^\s*- id: mcp-manager$/m.test(fs.readFileSync(patch, 'utf8'))) problems.push('legacy patch row reappeared');
+if (problems.length) { console.error(`FAIL: idempotency: ${problems.join('; ')}`); process.exit(1); }
+NODE
+[ $? -eq 0 ] || { echo "FAIL: idempotency assertions failed" >&2; exit 1; }
+grep -q "already registered" "$TMP/activate2.log" || {
+  echo "FAIL: second activate.sh run did not report the registration as already present" >&2
   cat "$TMP/activate2.log" >&2
   exit 1
 }
-echo "   OK: single row, duplicate guard reported"
+echo "   OK: single dependency/bundle entry, registration reported as already present"
 
 echo "4/6 install the liveness probe (test/e2e/verify-probe) as the last patch row"
 PROBE_DEST="$HOME_DIR/profiles/$PROFILE/node_modules/dsh-mcp-verify-probe"
 mkdir -p "$PROBE_DEST"
 cp "$PROBE_SRC/index.js" "$PROBE_SRC/package.json" "$PROBE_DEST/"
+# The bundle-local row no longer lives in the patch layer, so the profile patch is
+# the empty-sequence placeholder again: drop it before appending the probe entry.
+if [ "$(grep -vE '^[[:space:]]*(#|$)' "$PATCH" | tr -d '[:space:]')" = "[]" ]; then
+  grep -vE '^[[:space:]]*\[\][[:space:]]*$' "$PATCH" > "$PATCH.tmp" || true
+  mv "$PATCH.tmp" "$PATCH"
+fi
 cat >> "$PATCH" <<'YAML'
 
 - insert:
@@ -206,6 +255,9 @@ const summary = report ? {
   targetToolsAfterDispose: report.targetToolsAfterDispose,
   targetEntryAfterDispose: report.targetEntryAfterDispose,
   clientEntryPresent: report.clientEntryPresent,
+  pluginManagerAvailable: report.pluginManagerAvailable ?? null,
+  pluginManagerRow: report.pluginManagerRow ?? null,
+  pluginManagerError: report.pluginManagerError ?? null,
   clientGraph: report.clientGraph ? {
     rev: report.clientGraph.rev,
     release: report.clientGraph.release,
@@ -247,6 +299,21 @@ if (report) {
   }
   if (typeof report.clientBundlePath !== 'string' || !report.clientBundlePath.endsWith('/lib/client.js')) {
     fail(`ctx.clientModules.clientPath() did not resolve lib/client.js: ${JSON.stringify(report.clientBundlePath)}`);
+  }
+
+  // Installed-plugins list surface: pluginManager.listBundles() must expose the
+  // package as an installed + enabled bundle (this is what the Desktop page reads).
+  if (report.pluginManagerError) fail(`pluginManager.listBundles() threw: ${JSON.stringify(report.pluginManagerError)}`);
+  if (report.pluginManagerAvailable !== true) {
+    fail('pluginManager service/listBundles() unavailable in the isolated profile; cannot prove the installed-plugins row');
+  }
+  const bundleRow = report.pluginManagerRow;
+  if (!bundleRow) fail('pluginManager.listBundles() has no dsh-mcp-manager row (not visible in 插件 → 已安装插件)');
+  else {
+    if (bundleRow.installed !== true) fail(`installed-plugins row installed=${bundleRow.installed}`);
+    if (bundleRow.enabled !== true) fail(`installed-plugins row enabled=${bundleRow.enabled}`);
+    if (bundleRow.error !== null && bundleRow.error !== undefined) fail(`installed-plugins row error=${JSON.stringify(bundleRow.error)}`);
+    if (typeof bundleRow.version !== 'string' || bundleRow.version.length === 0) fail(`installed-plugins row version=${JSON.stringify(bundleRow.version)}`);
   }
 
   // Served-HTML evidence: the boot graph injected into the index advertises the bundle.

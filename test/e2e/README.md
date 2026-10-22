@@ -16,7 +16,7 @@ SKIP_UNIT=1 bash test/e2e/run-all.sh
 
 | 脚本 | 断言 |
 |---|---|
-| `install-scripts.sh` | `install/activate.sh`：复制包、追加唯一 row、重复安装幂等、`--remove` 删除 row/备份/恢复 `[]` 占位、二次 remove no-op、拒绝写真实 `~/.dsh` |
+| `install-scripts.sh` | `install/activate.sh`：正式 **bundle 注册**——复制包、备份 package.json+cordis.patch.yml、`dependencies["dsh-mcp-manager"]="github:iswilliamleeya/dsh-mcp-manager"` + `dsh.profile.bundles` 追加（2 空格/末尾换行/其他字段保留）、清除旧 mcp-manager patch 行并恢复 `[]`、幂等（"already registered"）、旧样式安装迁移、`--remove` 反向清理（保留包目录）、二次 remove no-op 且不产生新备份、拒绝写真实 `~/.dsh`；输出提示「插件 → 已安装插件」 |
 | `../install/verify-plugin.sh` | 真实 CLI 隔离启动本插件：loader entry 存在且 active、注册 8 个 `mcp_manager_*` 工具、`fiber.dispose()` 无异常且注销工具、**client 半可被发现**（`ctx.clientModules.graph()` 含 `dsh-mcp-manager` row + 服务端 index 的 `__DSH_BOOT__` 含 `dsh-mcp-manager/client.js`）、日志无 loader/module/TypeError 错误 |
 | `clean-reinstall-smoke.sh` | 卸载/删数据/重装 A/B/C/D 实验（并从带 workspaces/externalScopes 的**旧 manifest** 启动：state 不暴露这些字段、manifest 被剥离、server 仍正常挂载）：A 装插件+`server.add` 两条（echo-on 启用、echo-off 停用）→ state 2 条；B 卸载插件保留 `$DSH_HOME/mcp-manager.json` 重装 → 新进程 state 仍 2 条且 echo-on 重新挂载（manifest 是宿主级注册表）；C 连 manifest 一起删再装 → state 0 条；D 插一条原生 `@deepseek-ai/dsh-mcp-client` row → state 出现 `source:'host'` 1 条（发现只认宿主原生配置） |
 | `native-discovery-smoke.sh` | 隔离 web profile 同时挂一条原生 `@deepseek-ai/dsh-mcp-client` row（`native-echo` → `test/e2e/fixtures/live-echo-server.mjs`）和本插件：state 发现 `source:'host'`/readOnly/entryId/active/scope/toolCount；外部项不可编辑（`server.update`/remove/toggle → `EXTERNAL_READONLY`，add 同名 → `EXISTS_HOST_CONFIG`）；第二次启动预置同名 manager 项验证 `conflict:'host'` 且不重复挂载 |

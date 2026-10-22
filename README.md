@@ -30,28 +30,36 @@ DeepSeek Harness（DSH）Desktop 的原生 **MCP 管理插件**：在左侧栏�
 
 ## 安装
 
-### 方式一：文件级安装（推荐，回滚简单）
+### 方式一：安装脚本（推荐，回滚简单）
 
 ```bash
 git clone git@github.com:iswilliamleeya/dsh-mcp-manager.git
 cd dsh-mcp-manager
 
-# 默认写入 desktop profile；脚本默认拒绝写真实 ~/.dsh，需要显式放行
+# 安装：复制包 + 注册为 profile bundle（默认 desktop profile）
 DSH_MCP_MANAGER_ALLOW_REAL=1 bash install/activate.sh
 
-# 卸载（只删 patch 行，MCP 配置保留）
+# 卸载：移除 bundle 注册/依赖与遗留 patch 行（MCP 配置保留）
 DSH_MCP_MANAGER_ALLOW_REAL=1 bash install/activate.sh --remove
 ```
 
-脚本做的事：复制包到 `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager`，
-把本包 `cordis.patch.yml` 的 insert row 追加到 profile patch 层（带时间戳备份、重复守卫）。
+脚本做的事：
 
-### 方式二：profile bundle
+1. 复制包到 `$DSH_HOME/profiles/<profile>/node_modules/dsh-mcp-manager`；
+2. 备份 profile `package.json` 与 `cordis.patch.yml`（时间戳）；
+3. 在 `package.json` 写入依赖 `"dsh-mcp-manager": "github:iswilliamleeya/dsh-mcp-manager"`，
+   并把 `dsh-mcp-manager` 追加到 `dsh.profile.bundles`；
+   **因此安装后它会出现在「插件 → 已安装插件」列表**；
+4. 兼容旧安装：删除遗留的手工 `mcp-manager` patch 行；
+5. `--remove` 反向清理 bundles/dependency/遗留 patch 行，保留包目录与 MCP manifest。
 
-用 `plugin_manager` 的 `install_bundle`，target 指向本包绝对路径。
+### 方式二：plugin_manager
 
-> 两种方式都会让 patch watcher 重载组合，**可能中断正在运行的会话**；安装后重启 DSH 生效。
-> 安装后 client 半通过 `dsh.client` 自动被发现，无需改 `dsh.profile.bundles`。
+用 `plugin_manager` 的 `install_bundle`（target 填本包路径或安装 spec），效果相同：作为正式 bundle 注册。
+
+> 安装/卸载都会让 profile 组合重载，**可能中断正在运行的会话**；安装后刷新页面，必要的话重启 DSH。
+> 插件出现在「插件 → 已安装插件」的前提是它被注册进 `dsh.profile.bundles`——安装脚本和
+> `plugin_manager` 都会自动完成；手动改 patch 层（旧方式）不会出现在该列表。
 
 ### 数据与卸载
 
@@ -234,6 +242,7 @@ bash install/verify-plugin.sh         # 隔离 DSH_HOME + web 模板启动验证
 
 ## 变更记录
 
+- **0.3.1**：安装脚本改为正式 profile bundle 注册，安装后出现在「插件 → 已安装插件」列表。
 - **0.3.0**：单一「添加 MCP」弹窗（手动/粘贴 tab + 连接测试）、请求头默认一行、两个 tab 自动等高；
   移除按工作区划分作用域；移除自建 key 加密，改为 `env:` / `credential:` 引用 + 0600 明文。
 

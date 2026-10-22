@@ -1,6 +1,6 @@
 {
   "name": "dsh-mcp-manager",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "MCP manager for the DeepSeek Harness Desktop: add/edit/remove MCP servers, paste mcpServers JSON, test connectivity, and discover host-configured MCP servers",
   "type": "module",

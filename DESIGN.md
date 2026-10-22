@@ -1,6 +1,7 @@
-# dsh-mcp-manager 设计（v0.3.0）
+# dsh-mcp-manager 设计（v0.3.1）
 
-> 状态：已实施并通过隔离 e2e。初版 2026-10-19；2026-10-21 移除工作区作用域与自建加密。
+> 状态：已实施并通过隔离 e2e。初版 2026-10-19；2026-10-21 移除工作区作用域与自建加密；
+> 2026-10-22 安装改为正式 profile bundle 注册（安装后显性出现在「插件 → 已安装插件」）。
 > 面向维护者的实现约定；用户使用说明见 [README.md](README.md)。
 
 ## 1. 目标与非目标
@@ -28,6 +29,7 @@
 | 可见性 | 该 profile 内所有会话、所有工作区共享同一套 MCP |
 | 挂载时机 | 插件 apply 时挂载启用的 server；manifest 变更后差分 mount/unmount |
 | 数据生命周期 | manifest 常驻；卸载插件不删 manifest |
+| 安装形态 | **必须是 profile bundle**：由安装脚本/`plugin_manager` 写入 profile `dependencies` 与 `dsh.profile.bundles`，这样才会出现在「插件 → 已安装插件」；仅手改 patch 层的旧方式不会出现在列表 |
 
 ## 3. 数据
 
@@ -200,8 +202,11 @@ dsh-mcp-manager/
    mount 差分、probe 分类、RPC 分发、external 发现/冲突、import/importTest。
 2. **client** `bash test/client/run.sh`：`node --check`、注册/契约静态断言、stub-React 渲染分支。
 3. **隔离 e2e** `bash test/e2e/run-all.sh`（临时 `DSH_HOME` + `--from-default-profile web`）：
-   install 契约、启动/工具注册/dispose、RPC 导入、importTest、原生 row 发现、clean reinstall、references。
-4. **启动验证** `bash install/verify-plugin.sh`：真实 CLI 下 loader entry active、8 个模型工具、client 半被发现、dispose 干净。
+   install 契约（28 断言：复制、bundle 注册、备份、幂等、旧 patch 迁移、`--remove`、真实 home 守卫）、
+   启动/工具注册/dispose、RPC 导入、importTest、原生 row 发现、clean reinstall、references。
+4. **启动验证** `bash install/verify-plugin.sh`：真实 CLI 下 bundle 注册进 profile、loader entry active、
+   8 个模型工具、client 半被发现、dispose 干净；probe 通过 `pluginManager.listBundles()` 断言
+   `installed:true / enabled:true / source`（即「已安装插件」页的数据源）。
 
 ## 9. 安全边界
 
