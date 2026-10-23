@@ -7,7 +7,7 @@ DeepSeek Harness（DSH）Desktop 的原生 **MCP 管理插件**：在左侧栏�
 - **独立注册表**：manifest 落在 `$DSH_HOME/mcp-manager.json`，增删改即时挂载/卸载，不改 patch、不热重载插件树；
 - **原生 GUI**：原生 React 页面（非 iframe），复用 DSH 的侧栏/弹窗/主题 token；
 - **密钥两种存法**：`env:NAME` / `credential:NAME` 引用（推荐），或 0600 manifest 明文；
-- 当前版本 **0.3.0**，目标运行时 DSH **0.2.1-rc.2**、Node **>=22**。
+- 当前版本 **0.3.2**，目标运行时 DSH **0.2.1-rc.2**、Node **>=22**。
 
 ## 功能
 
@@ -242,6 +242,7 @@ bash install/verify-plugin.sh         # 隔离 DSH_HOME + web 模板启动验证
 
 ## 变更记录
 
+- **0.3.2**：UI 对齐 DSH 设计系统——字号收敛到 8 档字阶、圆角全部 token 化、间距统一 `--dim-space-*`、列表改为原生裸行、补齐 `prefers-reduced-motion` 与弹窗焦点管理/`aria-*`。
 - **0.3.1**：安装脚本改为正式 profile bundle 注册，安装后出现在「插件 → 已安装插件」列表。
 - **0.3.0**：单一「添加 MCP」弹窗（手动/粘贴 tab + 连接测试）、请求头默认一行、两个 tab 自动等高；
   移除按工作区划分作用域；移除自建 key 加密，改为 `env:` / `credential:` 引用 + 0600 明文。

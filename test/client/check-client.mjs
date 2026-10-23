@@ -150,8 +150,8 @@ await check('single add dialog: tabs, 连接测试 section, add-mode defaults an
 
 await check('toolbar has only 刷新 + 添加 MCP; tabs live inside the dialog', () => {
   const toolbar = source.slice(source.indexOf('const pageHead = h('), source.indexOf("if (view === 'detail'"));
-  assert.match(toolbar, /icon: h\(IconRefreshOutlineRegular, \{ size: 13 \}\)[\s\S]*?'刷新'\)/, '刷新 button missing');
-  assert.match(toolbar, /icon: h\(IconPlusOutlineRegular, \{ size: 13 \}\)[\s\S]*?'添加 MCP'\)/, 'single 添加 MCP button missing');
+  assert.match(toolbar, /icon: h\(IconRefreshOutlineRegular, \{ size: 13[^}]*\}\)[\s\S]*?'刷新'\)/, '刷新 button missing');
+  assert.match(toolbar, /icon: h\(IconPlusOutlineRegular, \{ size: 13[^}]*\}\)[\s\S]*?'添加 MCP'\)/, 'single 添加 MCP button missing');
   assert.ok(!toolbar.includes('手动配置'), 'manual-config toolbar button must be gone');
   assert.ok(!toolbar.includes('代码粘贴'), 'paste-code toolbar button must be gone');
   assert.ok(source.includes('还没有 MCP server。点右上角「添加 MCP」'), 'empty-state guidance must use 添加 MCP');
@@ -193,7 +193,7 @@ await check('host-config rows: source/readOnly/conflict and readonly detail', ()
   assert.ok(source.includes("cause.code === 'EXISTS_HOST_CONFIG'"), 'EXISTS_HOST_CONFIG must be mapped to friendly copy');
   assert.ok(source.includes("server.source === 'host' ? h(Tag, null, '来自 DSH 配置') : null"), 'host rows must render the source badge');
   assert.ok(source.includes("server.conflict === 'host' ? h(Tag, { tone: 'warn' }, '与宿主配置重名，未重复挂载') : null"), 'conflict rows must render the warn badge');
-  assert.ok(source.includes("server.readOnly\n              ? null\n              : h('button', {"), 'readonly rows must not render the enable switch');
+  assert.match(source, /server\.readOnly\s*\?\s*null\s*:\s*h\('button', \{/, 'readonly rows must not render the enable switch');
 });
 
 await check('plaintext header/env values: encryption UI is gone, references stay editable', () => {
@@ -260,10 +260,10 @@ await check('dialog copy is concise and the layout uses the unified scale', () =
   assert.ok(source.includes("className: 'dim-pasteReplace'"), 'replace group element missing');
   assert.ok(source.includes('--dim-space-4'), 'spacing token missing');
   assert.ok(source.includes('--dim-space-field'), 'field spacing token missing');
-  assert.ok(source.includes('font-size:13px;font-weight:500;line-height:20px'), 'list title must be 13/20');
-  assert.ok(source.includes('.dim-field{display:flex;flex-direction:column;gap:6px;font-size:13px;line-height:18px'), 'field label must be 13/18');
+  assert.ok(source.includes('font:var(--dsw-font-xs-strong-13)'), 'list title must use the xs-strong-13 ladder token');
+  assert.ok(source.includes('.dim-field{display:flex;flex-direction:column;gap:var(--dim-space-2);font:var(--dsw-font-xs-13)'), 'field label must use the xs-13 ladder token + space-2');
   assert.ok(source.includes('.dim-detailSections{flex-direction:column;gap:var(--dim-space-6)'), 'detail sections must use 24px gaps');
-  assert.ok(source.includes('.dim-dialog{') && source.includes('gap:12px'), 'dialog head gap must be 12px');
+  assert.ok(source.includes('.dim-dialog{') && source.includes('gap:var(--dim-space-3)'), 'dialog head gap must be 12px');
 });
 
 await check('icons: plug MCP icon and single add button', () => {
@@ -328,9 +328,21 @@ await check('test result area shows latency/protocol/tools and error class', () 
 await check('CSS is token-based (dark mode)', () => {
   const tokens = source.match(/--dsw-alias-[a-z0-9-]+/g) ?? [];
   assert.ok(tokens.length >= 20, `expected many --dsw-alias-* tokens, got ${tokens.length}`);
-  for (const token of ['--dsw-alias-label-primary', '--dsw-alias-bg-layer-2', '--dsw-alias-state-success-primary', '--dsw-alias-state-warn-primary', '--dsw-alias-state-error-primary', '--dsw-radius-xl', '--dsw-font-mono']) {
+  for (const token of ['--dsw-alias-label-primary', '--dsw-alias-bg-layer-2', '--dsw-alias-state-success-primary', '--dsw-alias-state-warn-primary', '--dsw-alias-state-error-primary', '--dsw-radius-xl', '--dsh-font-family-code-default', '--dsw-font-xs-13', '--dsh-frame-top-clearance']) {
     assert.ok(source.includes(token), `missing CSS token: ${token}`);
   }
+  // SPEC §1.7: entry pages must add the desktop top clearance on darwin/Windows titlebar.
+  assert.match(source, /\[data-platform=darwin\] \.dim-pageHead,\[data-windows-titlebar\] \.dim-pageHead\{padding-top:calc\(var\(--dim-space-6\) \+ var\(--dsh-frame-top-clearance,0px\)\)\}/, 'page header needs the platform clearance rule');
+  assert.match(source, /\[data-platform=darwin\] \.dim-detailTop,\[data-windows-titlebar\] \.dim-detailTop\{padding-top:calc\(var\(--dim-space-6\) \+ var\(--dsh-frame-top-clearance,0px\)\)\}/, 'detail top needs the platform clearance rule');
+  assert.ok(!source.includes('--dsw-font-mono'), '--dsw-font-mono does not exist in DSH, use --dsh-font-family-code-default');
+  assert.ok(!/font-size\s*:\s*(12\.5|11\.5|10)px/.test(source), 'font sizes outside the DSH ladder must be gone');
+  assert.match(source, /@media \(prefers-reduced-motion: reduce\)/, 'reduced-motion fallback missing');
+  assert.match(source, /\.dim-switch\{[^}]*border-radius:999px;[^}]*corner-shape:round/, 'switch track must be a pill with corner-shape: round');
+  assert.match(source, /\.dim-dot\{[^}]*border-radius:50%;corner-shape:round/, 'status dot must pair 50% with corner-shape: round');
+  assert.ok(source.includes("role: 'dialog'") && source.includes("'aria-modal': 'true'") && source.includes('aria-labelledby'), 'dialog must expose role/aria-modal/aria-labelledby');
+  assert.ok(source.includes("event.key === 'Escape'"), 'dialog must close on Escape');
+  assert.ok(source.includes("'aria-live': 'polite'"), 'async results need aria-live regions');
+  assert.ok(source.includes("'aria-invalid':"), 'invalid form fields need aria-invalid');
   assert.ok(source.includes('dim-page'), 'missing dim-page layout');
   assert.ok(source.includes('dim-overlay'), 'missing dialog overlay');
 });

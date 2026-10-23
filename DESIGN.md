@@ -1,4 +1,4 @@
-# dsh-mcp-manager 设计（v0.3.1）
+# dsh-mcp-manager 设计（v0.3.2）
 
 > 状态：已实施并通过隔离 e2e。初版 2026-10-19；2026-10-21 移除工作区作用域与自建加密；
 > 2026-10-22 安装改为正式 profile bundle 注册（安装后显性出现在「插件 → 已安装插件」）。
@@ -172,14 +172,17 @@ ServerInput = ServerView 去掉 source/readOnly/entryId/active/disabled/scope/co
 - 等高机制：add 模式两个 tab 的配置面板同时渲染，`display:grid; grid-template-rows:1fr`，
   两个面板 `grid-area:1/1` 同格叠放；非激活面板 `visibility:hidden`（保留占位、不可聚焦），
   行高 = 两者自然高度最大值 → 切换 tab 高度零跳动、无内部滚动；
-- 规范：间距 4/8/12/16/24（字段间 14）；文字层级（20/28 标题、13/20 说明、14/20 区块标题、13/18 标签、12/18 hint）；
-  只用 `--dsw-alias-*` token，深色模式一致。
+- 规范：间距走 `--dim-space-*`（4/8/12/16/24/32/48，字段间 `--dim-space-field:14px`，与 im 同名同值）；
+  文字层级走 DSH 8 档字阶（`xl-24` 页头、`l-20` 详情标题、`m-18` 弹窗标题、`xs-strong-13` 行主文案、
+  `xs-13` 控件、`xxs-12` 辅助与 meta、`xxxs-11` tag），字号与行高成对；圆角只用 `--dsw-radius-*`，
+  `50%`/`999px` 配 `corner-shape:round`；列表为原生裸行（无外框无分隔线，-8px 出血 + `radius-xl` + 整行 hover）；
+  阴影只用 `--dsw-elevation-*`；只用 `--dsw-alias-*` token，深浅色一致，并有 `prefers-reduced-motion` 降级。
 
 ## 7. 文件布局
 
 ```
 dsh-mcp-manager/
-  package.json          # 0.3.0，MIT，dsh.bundle / dsh.client
+  package.json          # 0.3.2，MIT，dsh.bundle / dsh.client
   cordis.patch.yml      # profile bundle 层（insert mcp-manager 行）
   lib/index.js          # Cordis 入口：Config/apply、模型工具、/mcp-manager RPC、生命周期
   lib/manifest.js       # manifest 校验/规范化/原子 0600、旧字段剥离、引用解析、toolCount 归属
